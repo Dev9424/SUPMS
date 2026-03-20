@@ -1,0 +1,156 @@
+const express = require('express');
+const mysql = require('mysql2');
+const cors = require('cors');
+const bodyParser = require('body-parser');
+const session = require('express-session');
+
+const app = express();
+
+app.use(cors());
+app.use(bodyParser.json());
+app.use(session({ secret: 'secret', resave: false, saveUninitialized: true }));
+
+const db = mysql.createConnection({
+    host: 'localhost',
+    user: 'hospital_user',
+    password: 'hospital_pass',
+    database: 'hospital'
+});
+
+db.connect((err) => {
+            if (err) throw err;
+            console.log('Connected to MySQL');
+            // ...existing code...
+            // Place admin endpoints after app and db initialization
+
+            if (req.session.user.role === 'patient') {
+                // ...existing code...
+                // Place admin endpoints after app and db initialization
+
+                // ADMIN: List all patients
+                app.get('/admin/patients', (req, res) => {
+                    if (!req.session.user || req.session.user.role !== 'hospital_admin') return res.status(403).send('Forbidden');
+                    db.query('SELECT id, username, role FROM users WHERE role = ?', ['patient'], (err, results) => {
+                        if (err) return res.status(500).send(err);
+                        res.send(results);
+                    });
+                });
+
+                // ADMIN: Remove patient
+                app.delete('/admin/remove-patient/:id', (req, res) => {
+                    if (!req.session.user || req.session.user.role !== 'hospital_admin') return res.status(403).send('Forbidden');
+                    const patientId = req.params.id;
+                    db.query('DELETE FROM users WHERE id = ? AND role = ?', [patientId, 'patient'], (err, result) => {
+                        if (err) return res.status(500).send(err);
+                        if (result.affectedRows === 0) return res.status(404).send('Patient not found');
+                        res.send({ success: true });
+                    });
+                });
+
+                // ADMIN: Reset patient password
+                app.post('/admin/reset-patient-password', (req, res) => {
+                    if (!req.session.user || req.session.user.role !== 'hospital_admin') return res.status(403).send('Forbidden');
+                    const { id, newPassword } = req.body;
+                    if (!id || !newPassword) return res.status(400).send('Missing id or newPassword');
+                    db.query('UPDATE users SET password = ? WHERE id = ? AND role = ?', [newPassword, id, 'patient'], (err, result) => {
+                        if (err) return res.status(500).send(err);
+                        if (result.affectedRows === 0) return res.status(404).send('Patient not found');
+                        res.send({ success: true });
+                    });
+                });
+
+                // ADMIN: Assign user role
+                app.post('/admin/assign-role', (req, res) => {
+                    if (!req.session.user || req.session.user.role !== 'hospital_admin') return res.status(403).send('Forbidden');
+                    const { id, role } = req.body;
+                    if (!id || !role) return res.status(400).send('Missing id or role');
+                    if (!['doctor', 'patient', 'hospital_admin'].includes(role)) return res.status(400).send('Invalid role');
+                    db.query('UPDATE users SET role = ? WHERE id = ?', [role, id], (err, result) => {
+                        if (err) return res.status(500).send(err);
+                        if (result.affectedRows === 0) return res.status(404).send('User not found');
+                        res.send({ success: true });
+                    });
+                });
+
+                // ADMIN: Add new doctor
+                app.post('/admin/add-doctor', (req, res) => {
+                    if (!req.session.user || req.session.user.role !== 'hospital_admin') return res.status(403).send('Forbidden');
+                    const { username, password } = req.body;
+                    if (!username || !password) return res.status(400).send('Missing username or password');
+                    db.query('INSERT INTO users (username, password, role) VALUES (?, ?, ?)', [username, password, 'doctor'], (err) => {
+                        if (err) {
+                            if (err.code === 'ER_DUP_ENTRY') return res.status(409).send('Username already exists');
+                            return res.status(500).send(err);
+                        }
+                        res.send({ success: true });
+                    });
+                });
+
+                // ADMIN: List all doctors
+                app.get('/admin/doctors', (req, res) => {
+                    if (!req.session.user || req.session.user.role !== 'hospital_admin') return res.status(403).send('Forbidden');
+                    db.query('SELECT id, username FROM users WHERE role = ?', ['doctor'], (err, results) => {
+                        if (err) return res.status(500).send(err);
+                        res.send(results);
+                    });
+                });
+
+                // ADMIN: Remove doctor
+                app.delete('/admin/remove-doctor/:id', (req, res) => {
+                    if (!req.session.user || req.session.user.role !== 'hospital_admin') return res.status(403).send('Forbidden');
+                    const doctorId = req.params.id;
+                    db.query('DELETE FROM users WHERE id = ? AND role = ?', [doctorId, 'doctor'], (err, result) => {
+                        if (err) return res.status(500).send(err);
+                        if (result.affectedRows === 0) return res.status(404).send('Doctor not found');
+                        res.send({ success: true });
+                    });
+                });
+
+                app.get('/dashboard', (req, res) => {
+                    if (!req.session.user || req.session.user.role !== 'doctor') return res.status(403).send('Forbidden');
+                    const doctorId = req.session.user.id;
+                    // Total patients
+                    db.query('SELECT COUNT(DISTINCT patient_id) as totalPatients FROM visits WHERE doctor_id = ?', [doctorId], (err, patientRes) => {
+                        if (err) return res.status(500).send(err);
+                        // Total visits
+                        db.query('SELECT COUNT(*) as totalVisits FROM visits WHERE doctor_id = ?', [doctorId], (err, visitRes) => {
+                            if (err) return res.status(500).send(err);
+                            // Recent visits
+                            db.query('SELECT visits.*, patients.name as patient_name FROM visits JOIN patients ON visits.patient_id = patients.id WHERE visits.doctor_id = ? ORDER BY visit_date DESC LIMIT 5', [doctorId], (err, recentRes) => {
+                                if (err) return res.status(500).send(err);
+                                // Common diagnoses
+                                db.query('SELECT diagnosis, COUNT(*) as count FROM visits WHERE doctor_id = ? GROUP BY diagnosis ORDER BY count DESC LIMIT 3', [doctorId], (err, diagRes) => {
+                                    if (err) return res.status(500).send(err);
+                                    res.send({
+                                        totalPatients: patientRes[0].totalPatients,
+                                        totalVisits: visitRes[0].totalVisits,
+                                        recentVisits: recentRes,
+                                        commonDiagnoses: diagRes
+                                    });
+                                });
+                            });
+                        });
+                    });
+                });
+
+                // ADMIN: Analytics Dashboard
+                app.get('/admin/analytics', (req, res) => {
+                    if (!req.session.user || req.session.user.role !== 'hospital_admin') return res.status(403).send('Forbidden');
+                    // Disease trends: Top diagnoses with counts
+                    db.query('SELECT diagnosis, COUNT(*) as count FROM visits GROUP BY diagnosis ORDER BY count DESC LIMIT 10', (err, diseaseTrends) => {
+                        if (err) return res.status(500).send(err);
+                        // Patient growth: Patients added over time (using visit dates as proxy)
+                        db.query('SELECT DATE(visit_date) as date, COUNT(DISTINCT patient_id) as newPatients FROM visits GROUP BY DATE(visit_date) ORDER BY date', (err, patientGrowth) => {
+                            if (err) return res.status(500).send(err);
+                            // Hospital performance: Total stats
+                            db.query('SELECT COUNT(*) as totalVisits, COUNT(DISTINCT patient_id) as totalPatients, COUNT(DISTINCT doctor_id) as totalDoctors FROM visits', (err, performance) => {
+                                if (err) return res.status(500).send(err);
+                                res.send({
+                                    diseaseTrends,
+                                    patientGrowth,
+                                    performance: performance[0]
+                                });
+                            });
+                        });
+                    });
+                });
