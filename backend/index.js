@@ -2,18 +2,39 @@ const express = require('express');
 const mysql = require('mysql2');
 const cors = require('cors');
 const bodyParser = require('body-parser');
-const session = require('express-session');
+const argon2 = require('argon2');
+const cookieParser = require('cookie-parser');
+const jwt = require('jsonwebtoken');
+
+const JWT_SECRET = 'super-secret-hmac-sha256-key-12345';
 
 const app = express();
 
-app.use(cors());
+app.use(cors({
+    origin: 'http://localhost:3001',
+    credentials: true
+}));
 app.use(bodyParser.json());
-app.use(session({ secret: 'secret', resave: false, saveUninitialized: true }));
+app.use(cookieParser());
+
+// Robust JWT Verification Middleware
+app.use((req, res, next) => {
+    if (req.cookies.token) {
+        try {
+            // Verify HMAC-SHA256 signature and attach payload
+            const decoded = jwt.verify(req.cookies.token, JWT_SECRET, { algorithms: ['HS256'] });
+            req.user = decoded;
+        } catch (e) {
+            console.error('JWT verification failed:', e.message);
+        }
+    }
+    next();
+});
 
 const db = mysql.createConnection({
     host: 'localhost',
-    user: 'hospital_user',
-    password: 'hospital_pass',
+    user: 'root',
+    password: '[password]',
     database: 'hospital'
 });
 
@@ -32,12 +53,12 @@ db.connect((err) => {
     password VARCHAR(255),
     role VARCHAR(50)
   )`, (err) => { if (err) console.log(err); });
-    
+
     // Drop and recreate visits table to ensure notes column exists
-    db.query(`DROP TABLE IF EXISTS visits`, (err) => { 
-        if (err) console.log('Error dropping visits table:', err); 
+    db.query(`DROP TABLE IF EXISTS visits`, (err) => {
+        if (err) console.log('Error dropping visits table:', err);
     });
-    
+
     db.query(`CREATE TABLE visits (
             id INT AUTO_INCREMENT PRIMARY KEY,
             patient_id INT,
@@ -51,11 +72,11 @@ db.connect((err) => {
             notes TEXT,
             FOREIGN KEY (patient_id) REFERENCES patients(id),
             FOREIGN KEY (doctor_id) REFERENCES users(id)
-        )`, (err) => { 
-            if (err) console.log('Error creating visits table:', err); 
-            else console.log('Visits table created successfully with notes column');
-        });
-    
+        )`, (err) => {
+        if (err) console.log('Error creating visits table:', err);
+        else console.log('Visits table created successfully with notes column');
+    });
+
     // Create patient_profiles table for extended patient information
     db.query(`CREATE TABLE IF NOT EXISTS patient_profiles (
         id INT AUTO_INCREMENT PRIMARY KEY,
@@ -69,12 +90,12 @@ db.connect((err) => {
         emergency_contact VARCHAR(20),
         FOREIGN KEY (user_id) REFERENCES users(id)
     )`, (err) => { if (err) console.log(err); });
-    
+
     // Create appointments table with approval status
-    db.query(`DROP TABLE IF EXISTS appointments`, (err) => { 
-        if (err) console.log('Error dropping appointments table:', err); 
+    db.query(`DROP TABLE IF EXISTS appointments`, (err) => {
+        if (err) console.log('Error dropping appointments table:', err);
     });
-    
+
     db.query(`CREATE TABLE appointments (
         id INT AUTO_INCREMENT PRIMARY KEY,
         patient_id INT,
@@ -88,11 +109,11 @@ db.connect((err) => {
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         FOREIGN KEY (patient_id) REFERENCES patients(id),
         FOREIGN KEY (doctor_id) REFERENCES users(id)
-    )`, (err) => { 
-        if (err) console.log('Error creating appointments table:', err); 
+    )`, (err) => {
+        if (err) console.log('Error creating appointments table:', err);
         else console.log('Appointments table created successfully with approval system');
     });
-    
+
     // Create notifications table
     db.query(`CREATE TABLE IF NOT EXISTS notifications (
         id INT AUTO_INCREMENT PRIMARY KEY,
@@ -103,22 +124,28 @@ db.connect((err) => {
         is_read BOOLEAN DEFAULT FALSE,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         FOREIGN KEY (user_id) REFERENCES users(id)
-    )`, (err) => { 
-        if (err) console.log('Error creating notifications table:', err); 
+    )`, (err) => {
+        if (err) console.log('Error creating notifications table:', err);
         else console.log('Notifications table created successfully');
     });
-    
-    db.query("INSERT IGNORE INTO users (username, password, role) VALUES ('patient1', 'pass1', 'patient'), ('doctor1', 'pass2', 'doctor'), ('admin1', 'pass3', 'hospital_admin')", (err) => { if (err) console.log(err); });
-    
+
+    Promise.all([
+        argon2.hash('pass1'),
+        argon2.hash('pass2'),
+        argon2.hash('pass3')
+    ]).then(([hash1, hash2, hash3]) => {
+        db.query("INSERT IGNORE INTO users (username, password, role) VALUES ('patient1', ?, 'patient'), ('doctor1', ?, 'doctor'), ('admin1', ?, 'hospital_admin')", [hash1, hash2, hash3], (err) => { if (err) console.log(err); });
+    });
+
     // Create default patients for testing with proper names
-    db.query("INSERT IGNORE INTO patients (id, name, age) VALUES (1, 'John Smith', 30), (2, 'Sarah Johnson', 25)", (err) => { 
-        if (err) console.log(err); 
+    db.query("INSERT IGNORE INTO patients (id, name, age) VALUES (1, 'John Smith', 30), (2, 'Sarah Johnson', 25)", (err) => {
+        if (err) console.log(err);
         else console.log('Default patients created: John Smith, Sarah Johnson');
     });
-    
+
     // Create default patient profile if not exists
     db.query("INSERT IGNORE INTO patient_profiles (user_id, email, phone) SELECT id, CONCAT(username, '@example.com'), '0000000000' FROM users WHERE username='patient1'", (err) => { if (err) console.log(err); });
-    
+
     // Seed demo appointments with different approval statuses (after visits are done)
     setTimeout(() => {
         seedDemoData();
@@ -128,19 +155,19 @@ db.connect((err) => {
 // Function to seed demo data
 function seedDemoData() {
     console.log('Seeding demo medical data...');
-    
+
     // Get doctor1's ID
     db.query("SELECT id FROM users WHERE username='doctor1'", (err, doctorResult) => {
         if (err || doctorResult.length === 0) return;
         const doctorId = doctorResult[0].id;
-        
+
         // Get patient IDs
         db.query("SELECT id, name FROM patients", (err, patientResult) => {
             if (err || patientResult.length === 0) return;
-            
+
             const patient1Id = patientResult.find(p => p.name === 'John Smith')?.id || 1;
             const patient2Id = patientResult.find(p => p.name === 'Sarah Johnson')?.id || 2;
-            
+
             // Demo visits data
             const demoVisits = [
                 {
@@ -210,7 +237,7 @@ function seedDemoData() {
                     visit_date: '2024-03-18 10:00:00'
                 }
             ];
-            
+
             // Insert demo visits
             let inserted = 0;
             demoVisits.forEach((visit, index) => {
@@ -242,7 +269,7 @@ function seedDemoData() {
                     }
                 });
             });
-            
+
             // Seed demo appointments after visits are inserted
             setTimeout(() => {
                 seedDemoAppointments(doctorId, patient1Id, patient2Id);
@@ -254,11 +281,11 @@ function seedDemoData() {
 // Function to seed demo appointments
 function seedDemoAppointments(doctorId, patient1Id, patient2Id) {
     console.log('Seeding demo appointments...');
-    
+
     const now = new Date().toISOString().slice(0, 19).replace('T', ' ');
     const twoDaysAgo = new Date(Date.now() - 86400000 * 2).toISOString().slice(0, 19).replace('T', ' ');
     const oneDayAgo = new Date(Date.now() - 86400000).toISOString().slice(0, 19).replace('T', ' ');
-    
+
     const demoAppointments = [
         {
             patient_id: patient1Id,
@@ -302,7 +329,7 @@ function seedDemoAppointments(doctorId, patient1Id, patient2Id) {
             created_at: oneDayAgo
         }
     ];
-    
+
     let inserted = 0;
     demoAppointments.forEach((appt, index) => {
         const query = `INSERT INTO appointments (patient_id, doctor_id, appointment_date, status, approval_status, reason, notes, approved_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`;
@@ -323,7 +350,7 @@ function seedDemoAppointments(doctorId, patient1Id, patient2Id) {
                 inserted++;
                 const status = appt.approval_status.charAt(0).toUpperCase() + appt.approval_status.slice(1);
                 console.log(`✓ Inserted: ${status} appointment for ${appt.patient_id === patient1Id ? 'John Smith' : 'Sarah Johnson'}`);
-                
+
                 if (inserted === demoAppointments.length) {
                     console.log('\n✅ Demo appointments seeded!');
                     console.log('📊 Appointment Summary:');
@@ -339,57 +366,93 @@ function seedDemoAppointments(doctorId, patient1Id, patient2Id) {
 
 app.post('/login', (req, res) => {
     const { username, password } = req.body;
-    db.query('SELECT * FROM users WHERE username = ? AND password = ?', [username, password], (err, results) => {
+    db.query('SELECT * FROM users WHERE username = ?', [username], async (err, results) => {
         if (err) return res.status(500).send(err);
         if (results.length > 0) {
-            req.session.user = results[0];
-            res.send({ success: true, user: results[0] });
+            const user = results[0];
+            try {
+                if (await argon2.verify(user.password, password)) {
+                    // Generate JWT with HMAC-SHA256, expiration: 1 hour
+                    const token = jwt.sign(
+                        { id: user.id, username: user.username, role: user.role },
+                        JWT_SECRET,
+                        { algorithm: 'HS256', expiresIn: '1h' }
+                    );
+
+                    // Securely set the JWT in an HttpOnly cookie
+                    res.cookie('token', token, { httpOnly: true, secure: false });
+
+                    res.send({ success: true, user: { id: user.id, username: user.username, role: user.role } });
+                } else {
+                    res.send({ success: false, message: 'Invalid credentials' });
+                }
+            } catch (err) {
+                res.status(500).send(err);
+            }
         } else {
-            res.send({ success: false });
+            res.send({ success: false, message: 'Invalid credentials' });
         }
     });
 });
 
+app.get('/me', (req, res) => {
+    if (req.user) {
+        res.send({ success: true, user: req.user });
+    } else {
+        res.send({ success: false });
+    }
+});
+
+app.post('/logout', (req, res) => {
+    res.clearCookie('token');
+    res.send({ success: true });
+});
+
 // Patient Registration
-app.post('/patient/register', (req, res) => {
+app.post('/patient/register', async (req, res) => {
     const { username, password, name, age, email, phone, address, date_of_birth, gender, blood_group, emergency_contact } = req.body;
-    
+
     if (!username || !password || !name || !age) {
         return res.status(400).send('Missing required fields');
     }
-    
-    db.query('INSERT INTO users (username, password, role) VALUES (?, ?, ?)', [username, password, 'patient'], (err, result) => {
-        if (err) {
-            if (err.code === 'ER_DUP_ENTRY') return res.status(409).send('Username already exists');
-            return res.status(500).send(err);
-        }
-        
-        const userId = result.insertId;
-        
-        // Create patient record
-        db.query('INSERT INTO patients (name, age) VALUES (?, ?)', [name, age], (err) => {
-            if (err) console.log('Error creating patient record:', err);
-        });
-        
-        // Create patient profile
-        db.query('INSERT INTO patient_profiles (user_id, email, phone, address, date_of_birth, gender, blood_group, emergency_contact) VALUES (?, ?, ?, ?, ?, ?, ?, ?)', 
-            [userId, email || '', phone || '', address || '', date_of_birth || null, gender || null, blood_group || null, emergency_contact || null], 
-            (err) => {
-                if (err) console.log('Error creating profile:', err);
+
+    try {
+        const hashedPassword = await argon2.hash(password);
+        db.query('INSERT INTO users (username, password, role) VALUES (?, ?, ?)', [username, hashedPassword, 'patient'], (err, result) => {
+            if (err) {
+                if (err.code === 'ER_DUP_ENTRY') return res.status(409).send('Username already exists');
+                return res.status(500).send(err);
             }
-        );
-        
-        res.send({ success: true, message: 'Registration successful' });
-    });
+
+            const userId = result.insertId;
+
+            // Create patient record
+            db.query('INSERT INTO patients (name, age) VALUES (?, ?)', [name, age], (err) => {
+                if (err) console.log('Error creating patient record:', err);
+            });
+
+            // Create patient profile
+            db.query('INSERT INTO patient_profiles (user_id, email, phone, address, date_of_birth, gender, blood_group, emergency_contact) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+                [userId, email || '', phone || '', address || '', date_of_birth || null, gender || null, blood_group || null, emergency_contact || null],
+                (err) => {
+                    if (err) console.log('Error creating profile:', err);
+                }
+            );
+
+            res.send({ success: true, message: 'Registration successful' });
+        });
+    } catch (err) {
+        res.status(500).send({ success: false, message: 'Error hashing password' });
+    }
 });
 
 // Get Patient Profile
 app.get('/patient/profile', (req, res) => {
-    if (!req.session.user || req.session.user.role !== 'patient') {
+    if (!req.user || req.user.role !== 'patient') {
         return res.status(403).send('Forbidden');
     }
-    
-    db.query('SELECT * FROM patient_profiles WHERE user_id = ?', [req.session.user.id], (err, results) => {
+
+    db.query('SELECT * FROM patient_profiles WHERE user_id = ?', [req.user.id], (err, results) => {
         if (err) return res.status(500).send(err);
         if (results.length === 0) return res.status(404).send('Profile not found');
         res.send(results[0]);
@@ -398,14 +461,14 @@ app.get('/patient/profile', (req, res) => {
 
 // Update Patient Profile
 app.put('/patient/profile', (req, res) => {
-    if (!req.session.user || req.session.user.role !== 'patient') {
+    if (!req.user || req.user.role !== 'patient') {
         return res.status(403).send('Forbidden');
     }
-    
+
     const { email, phone, address, date_of_birth, gender, blood_group, emergency_contact } = req.body;
-    
+
     db.query('UPDATE patient_profiles SET email = ?, phone = ?, address = ?, date_of_birth = ?, gender = ?, blood_group = ?, emergency_contact = ? WHERE user_id = ?',
-        [email, phone, address, date_of_birth, gender, blood_group, emergency_contact, req.session.user.id],
+        [email, phone, address, date_of_birth, gender, blood_group, emergency_contact, req.user.id],
         (err) => {
             if (err) return res.status(500).send(err);
             res.send({ success: true, message: 'Profile updated successfully' });
@@ -414,21 +477,21 @@ app.put('/patient/profile', (req, res) => {
 });
 
 app.get('/patients', (req, res) => {
-    if (!req.session.user) return res.status(401).send('Not logged in');
-    if (req.session.user.role === 'patient') {
+    if (!req.user) return res.status(401).send('Not logged in');
+    if (req.user.role === 'patient') {
         // Fetch visits for the logged-in patient by joining with users table
         db.query(`SELECT v.*, p.name as patient_name 
                   FROM visits v 
                   JOIN patients p ON v.patient_id = p.id 
                   WHERE p.name = ? 
-                  ORDER BY v.visit_date DESC`, 
-            [req.session.user.username], 
+                  ORDER BY v.visit_date DESC`,
+            [req.user.username],
             (err, results) => {
                 if (err) return res.status(500).send(err);
                 res.send(results);
             }
         );
-    } else if (req.session.user.role === 'doctor' || req.session.user.role === 'hospital_admin') {
+    } else if (req.user.role === 'doctor' || req.user.role === 'hospital_admin') {
         db.query('SELECT * FROM patients', (err, results) => {
             if (err) return res.status(500).send(err);
             res.send(results);
@@ -438,17 +501,17 @@ app.get('/patients', (req, res) => {
 
 // Get Patient's Complete Medical History
 app.get('/patient/medical-history', (req, res) => {
-    if (!req.session.user || req.session.user.role !== 'patient') {
+    if (!req.user || req.user.role !== 'patient') {
         return res.status(403).send('Forbidden');
     }
-    
+
     db.query(`SELECT v.*, p.name as patient_name, u.username as doctor_name 
               FROM visits v 
               JOIN patients p ON v.patient_id = p.id 
               JOIN users u ON v.doctor_id = u.id 
               WHERE p.name = ? 
-              ORDER BY v.visit_date DESC`, 
-        [req.session.user.username], 
+              ORDER BY v.visit_date DESC`,
+        [req.user.username],
         (err, results) => {
             if (err) return res.status(500).send(err);
             res.send(results);
@@ -458,39 +521,39 @@ app.get('/patient/medical-history', (req, res) => {
 
 // Get Patient Dashboard Stats
 app.get('/patient/dashboard', (req, res) => {
-    if (!req.session.user || req.session.user.role !== 'patient') {
+    if (!req.user || req.user.role !== 'patient') {
         return res.status(403).send('Forbidden');
     }
-    
+
     // Get total visits
-    db.query('SELECT COUNT(*) as totalVisits FROM visits v JOIN patients p ON v.patient_id = p.id WHERE p.name = ?', [req.session.user.username], (err, visitCount) => {
+    db.query('SELECT COUNT(*) as totalVisits FROM visits v JOIN patients p ON v.patient_id = p.id WHERE p.name = ?', [req.user.username], (err, visitCount) => {
         if (err) return res.status(500).send(err);
-        
+
         // Get ongoing treatments
-        db.query('SELECT COUNT(*) as ongoingTreatments FROM visits v JOIN patients p ON v.patient_id = p.id WHERE p.name = ? AND v.progress = ?', [req.session.user.username, 'ongoing'], (err, ongoingCount) => {
+        db.query('SELECT COUNT(*) as ongoingTreatments FROM visits v JOIN patients p ON v.patient_id = p.id WHERE p.name = ? AND v.progress = ?', [req.user.username, 'ongoing'], (err, ongoingCount) => {
             if (err) return res.status(500).send(err);
-            
+
             // Get recent visits (last 5)
             db.query(`SELECT v.*, u.username as doctor_name 
                       FROM visits v 
                       JOIN patients p ON v.patient_id = p.id 
                       JOIN users u ON v.doctor_id = u.id 
                       WHERE p.name = ? 
-                      ORDER BY v.visit_date DESC LIMIT 5`, 
-                [req.session.user.username], 
+                      ORDER BY v.visit_date DESC LIMIT 5`,
+                [req.user.username],
                 (err, recentVisits) => {
                     if (err) return res.status(500).send(err);
-                    
+
                     // Get latest prescription
                     db.query(`SELECT v.prescription, v.visit_date 
                               FROM visits v 
                               JOIN patients p ON v.patient_id = p.id 
                               WHERE p.name = ? AND v.prescription IS NOT NULL AND v.prescription != '' 
-                              ORDER BY v.visit_date DESC LIMIT 1`, 
-                        [req.session.user.username], 
+                              ORDER BY v.visit_date DESC LIMIT 1`,
+                        [req.user.username],
                         (err, latestPrescription) => {
                             if (err) return res.status(500).send(err);
-                            
+
                             res.send({
                                 totalVisits: visitCount[0].totalVisits,
                                 ongoingTreatments: ongoingCount[0].ongoingTreatments,
@@ -507,17 +570,17 @@ app.get('/patient/dashboard', (req, res) => {
 
 // Download Report (Get report file path/URL)
 app.get('/patient/reports', (req, res) => {
-    if (!req.session.user || req.session.user.role !== 'patient') {
+    if (!req.user || req.user.role !== 'patient') {
         return res.status(403).send('Forbidden');
     }
-    
+
     db.query(`SELECT v.id, v.visit_date, v.report, v.diagnosis, u.username as doctor_name 
               FROM visits v 
               JOIN patients p ON v.patient_id = p.id 
               JOIN users u ON v.doctor_id = u.id 
               WHERE p.name = ? AND v.report IS NOT NULL AND v.report != '' 
-              ORDER BY v.visit_date DESC`, 
-        [req.session.user.username], 
+              ORDER BY v.visit_date DESC`,
+        [req.user.username],
         (err, results) => {
             if (err) return res.status(500).send(err);
             res.send(results);
@@ -526,7 +589,7 @@ app.get('/patient/reports', (req, res) => {
 });
 
 app.get('/patients/:id', (req, res) => {
-    if (!req.session.user || (req.session.user.role !== 'doctor' && req.session.user.role !== 'hospital_admin')) {
+    if (!req.user || (req.user.role !== 'doctor' && req.user.role !== 'hospital_admin')) {
         return res.status(403).send('Forbidden');
     }
     const patientId = req.params.id;
@@ -541,7 +604,7 @@ app.get('/patients/:id', (req, res) => {
 });
 
 app.get('/patients/search', (req, res) => {
-    if (!req.session.user || (req.session.user.role !== 'doctor' && req.session.user.role !== 'hospital_admin')) {
+    if (!req.user || (req.user.role !== 'doctor' && req.user.role !== 'hospital_admin')) {
         return res.status(403).send('Forbidden');
     }
     const { query } = req.query;
@@ -553,19 +616,19 @@ app.get('/patients/search', (req, res) => {
 });
 
 app.post('/visits', (req, res) => {
-    if (!req.session.user || req.session.user.role !== 'doctor') {
+    if (!req.user || req.user.role !== 'doctor') {
         return res.status(403).send('Forbidden: Only doctors can add visits');
     }
-    
+
     const { patient_id, diagnosis, treatment, prescription, report, progress, notes } = req.body;
-    
+
     // Validate required fields
     if (!patient_id || !diagnosis || !treatment) {
         return res.status(400).send('Missing required fields: patient_id, diagnosis, and treatment are required');
     }
-    
-    db.query('INSERT INTO visits (patient_id, doctor_id, diagnosis, treatment, prescription, report, progress, notes) VALUES (?, ?, ?, ?, ?, ?, ?, ?)', 
-        [patient_id, req.session.user.id, diagnosis, treatment, prescription || '', report || '', progress || 'ongoing', notes || ''], 
+
+    db.query('INSERT INTO visits (patient_id, doctor_id, diagnosis, treatment, prescription, report, progress, notes) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+        [patient_id, req.user.id, diagnosis, treatment, prescription || '', report || '', progress || 'ongoing', notes || ''],
         (err) => {
             if (err) {
                 console.error('Database error:', err);
@@ -576,21 +639,27 @@ app.post('/visits', (req, res) => {
     );
 });
 
-app.post('/admin/add-doctor', (req, res) => {
-    if (!req.session.user || req.session.user.role !== 'hospital_admin') return res.status(403).send('Forbidden');
+app.post('/admin/add-doctor', async (req, res) => {
+    if (!req.user || req.user.role !== 'hospital_admin') return res.status(403).send('Forbidden');
     const { username, password } = req.body;
     if (!username || !password) return res.status(400).send('Missing username or password');
-    db.query('INSERT INTO users (username, password, role) VALUES (?, ?, ?)', [username, password, 'doctor'], (err) => {
-        if (err) {
-            if (err.code === 'ER_DUP_ENTRY') return res.status(409).send('Username already exists');
-            return res.status(500).send(err);
-        }
-        res.send({ success: true });
-    });
+
+    try {
+        const hashedPassword = await argon2.hash(password);
+        db.query('INSERT INTO users (username, password, role) VALUES (?, ?, ?)', [username, hashedPassword, 'doctor'], (err) => {
+            if (err) {
+                if (err.code === 'ER_DUP_ENTRY') return res.status(409).send('Username already exists');
+                return res.status(500).send(err);
+            }
+            res.send({ success: true });
+        });
+    } catch (err) {
+        res.status(500).send({ success: false, message: 'Error hashing password' });
+    }
 });
 
 app.get('/admin/doctors', (req, res) => {
-    if (!req.session.user || req.session.user.role !== 'hospital_admin') return res.status(403).send('Forbidden');
+    if (!req.user || req.user.role !== 'hospital_admin') return res.status(403).send('Forbidden');
     db.query('SELECT id, username FROM users WHERE role = ?', ['doctor'], (err, results) => {
         if (err) return res.status(500).send(err);
         res.send(results);
@@ -598,7 +667,7 @@ app.get('/admin/doctors', (req, res) => {
 });
 
 app.delete('/admin/remove-doctor/:id', (req, res) => {
-    if (!req.session.user || req.session.user.role !== 'hospital_admin') return res.status(403).send('Forbidden');
+    if (!req.user || req.user.role !== 'hospital_admin') return res.status(403).send('Forbidden');
     const doctorId = req.params.id;
     db.query('DELETE FROM users WHERE id = ? AND role = ?', [doctorId, 'doctor'], (err, result) => {
         if (err) return res.status(500).send(err);
@@ -608,8 +677,8 @@ app.delete('/admin/remove-doctor/:id', (req, res) => {
 });
 
 app.get('/dashboard', (req, res) => {
-    if (!req.session.user || req.session.user.role !== 'doctor') return res.status(403).send('Forbidden');
-    const doctorId = req.session.user.id;
+    if (!req.user || req.user.role !== 'doctor') return res.status(403).send('Forbidden');
+    const doctorId = req.user.id;
     db.query('SELECT COUNT(DISTINCT patient_id) as totalPatients FROM visits WHERE doctor_id = ?', [doctorId], (err, patientRes) => {
         if (err) return res.status(500).send(err);
         db.query('SELECT COUNT(*) as totalVisits FROM visits WHERE doctor_id = ?', [doctorId], (err, visitRes) => {
@@ -631,7 +700,7 @@ app.get('/dashboard', (req, res) => {
 });
 
 app.get('/admin/analytics', (req, res) => {
-    if (!req.session.user || req.session.user.role !== 'hospital_admin') return res.status(403).send('Forbidden');
+    if (!req.user || req.user.role !== 'hospital_admin') return res.status(403).send('Forbidden');
     db.query('SELECT diagnosis, COUNT(*) as count FROM visits GROUP BY diagnosis ORDER BY count DESC LIMIT 10', (err, diseaseTrends) => {
         if (err) return res.status(500).send(err);
         db.query('SELECT DATE(visit_date) as date, COUNT(DISTINCT patient_id) as newPatients FROM visits GROUP BY DATE(visit_date) ORDER BY date', (err, patientGrowth) => {
@@ -649,7 +718,7 @@ app.get('/admin/analytics', (req, res) => {
 });
 
 app.get('/admin/patients', (req, res) => {
-    if (!req.session.user || req.session.user.role !== 'hospital_admin') return res.status(403).send('Forbidden');
+    if (!req.user || req.user.role !== 'hospital_admin') return res.status(403).send('Forbidden');
     db.query('SELECT id, username, role FROM users WHERE role = ?', ['patient'], (err, results) => {
         if (err) return res.status(500).send(err);
         res.send(results);
@@ -657,7 +726,7 @@ app.get('/admin/patients', (req, res) => {
 });
 
 app.delete('/admin/remove-patient/:id', (req, res) => {
-    if (!req.session.user || req.session.user.role !== 'hospital_admin') return res.status(403).send('Forbidden');
+    if (!req.user || req.user.role !== 'hospital_admin') return res.status(403).send('Forbidden');
     const patientId = req.params.id;
     db.query('DELETE FROM users WHERE id = ? AND role = ?', [patientId, 'patient'], (err, result) => {
         if (err) return res.status(500).send(err);
@@ -666,19 +735,25 @@ app.delete('/admin/remove-patient/:id', (req, res) => {
     });
 });
 
-app.post('/admin/reset-patient-password', (req, res) => {
-    if (!req.session.user || req.session.user.role !== 'hospital_admin') return res.status(403).send('Forbidden');
+app.post('/admin/reset-patient-password', async (req, res) => {
+    if (!req.user || req.user.role !== 'hospital_admin') return res.status(403).send('Forbidden');
     const { id, newPassword } = req.body;
     if (!id || !newPassword) return res.status(400).send('Missing id or newPassword');
-    db.query('UPDATE users SET password = ? WHERE id = ? AND role = ?', [newPassword, id, 'patient'], (err, result) => {
-        if (err) return res.status(500).send(err);
-        if (result.affectedRows === 0) return res.status(404).send('Patient not found');
-        res.send({ success: true });
-    });
+
+    try {
+        const hashedPassword = await argon2.hash(newPassword);
+        db.query('UPDATE users SET password = ? WHERE id = ? AND role = ?', [hashedPassword, id, 'patient'], (err, result) => {
+            if (err) return res.status(500).send(err);
+            if (result.affectedRows === 0) return res.status(404).send('Patient not found');
+            res.send({ success: true });
+        });
+    } catch (err) {
+        res.status(500).send({ success: false, message: 'Error hashing password' });
+    }
 });
 
 app.post('/admin/assign-role', (req, res) => {
-    if (!req.session.user || req.session.user.role !== 'hospital_admin') return res.status(403).send('Forbidden');
+    if (!req.user || req.user.role !== 'hospital_admin') return res.status(403).send('Forbidden');
     const { id, role } = req.body;
     if (!id || !role) return res.status(400).send('Missing id or role');
     if (!['doctor', 'patient', 'hospital_admin'].includes(role)) return res.status(400).send('Invalid role');
@@ -693,37 +768,37 @@ app.post('/admin/assign-role', (req, res) => {
 
 // Book an appointment (Patient)
 app.post('/appointments/book', (req, res) => {
-    if (!req.session.user || req.session.user.role !== 'patient') {
+    if (!req.user || req.user.role !== 'patient') {
         return res.status(403).send('Forbidden: Only patients can book appointments');
     }
-    
+
     const { doctor_id, appointment_date, reason } = req.body;
-    
+
     if (!doctor_id || !appointment_date) {
         return res.status(400).send('Missing required fields: doctor_id and appointment_date');
     }
-    
+
     // Get patient_id from patients table
-    db.query('SELECT id FROM patients WHERE name = ?', [req.session.user.username], (err, patientResult) => {
+    db.query('SELECT id FROM patients WHERE name = ?', [req.user.username], (err, patientResult) => {
         if (err) return res.status(500).send(err);
         if (patientResult.length === 0) return res.status(404).send('Patient record not found');
-        
+
         const patientId = patientResult[0].id;
-        
-        db.query('INSERT INTO appointments (patient_id, doctor_id, appointment_date, reason, approval_status) VALUES (?, ?, ?, ?, ?)', 
-            [patientId, doctor_id, appointment_date, reason || '', 'pending'], 
+
+        db.query('INSERT INTO appointments (patient_id, doctor_id, appointment_date, reason, approval_status) VALUES (?, ?, ?, ?, ?)',
+            [patientId, doctor_id, appointment_date, reason || '', 'pending'],
             (err, result) => {
                 if (err) return res.status(500).send(err);
-                
+
                 // Create notification for doctor
                 const notificationQuery = 'INSERT INTO notifications (user_id, title, message, type) VALUES (?, ?, ?, ?)';
                 db.query(notificationQuery, [
                     doctor_id,
                     'New Appointment Request',
-                    `Patient ${req.session.user.username} has booked an appointment for ${new Date(appointment_date).toLocaleString()}`,
+                    `Patient ${req.user.username} has booked an appointment for ${new Date(appointment_date).toLocaleString()}`,
                     'appointment'
                 ]);
-                
+
                 res.send({ success: true, appointment_id: result.insertId });
             }
         );
@@ -732,22 +807,22 @@ app.post('/appointments/book', (req, res) => {
 
 // Get patient's appointments
 app.get('/appointments/my-appointments', (req, res) => {
-    if (!req.session.user || req.session.user.role !== 'patient') {
+    if (!req.user || req.user.role !== 'patient') {
         return res.status(403).send('Forbidden');
     }
-    
-    db.query('SELECT id FROM patients WHERE name = ?', [req.session.user.username], (err, patientResult) => {
+
+    db.query('SELECT id FROM patients WHERE name = ?', [req.user.username], (err, patientResult) => {
         if (err) return res.status(500).send(err);
         if (patientResult.length === 0) return res.status(404).send('Patient not found');
-        
+
         const patientId = patientResult[0].id;
-        
+
         db.query(`SELECT a.*, u.username as doctor_name 
                   FROM appointments a 
                   JOIN users u ON a.doctor_id = u.id 
                   WHERE a.patient_id = ? 
-                  ORDER BY a.appointment_date DESC`, 
-            [patientId], 
+                  ORDER BY a.appointment_date DESC`,
+            [patientId],
             (err, results) => {
                 if (err) return res.status(500).send(err);
                 res.send(results);
@@ -758,16 +833,16 @@ app.get('/appointments/my-appointments', (req, res) => {
 
 // Get doctor's appointments
 app.get('/appointments/doctor-schedule', (req, res) => {
-    if (!req.session.user || req.session.user.role !== 'doctor') {
+    if (!req.user || req.user.role !== 'doctor') {
         return res.status(403).send('Forbidden');
     }
-    
+
     db.query(`SELECT a.*, p.name as patient_name 
               FROM appointments a 
               JOIN patients p ON a.patient_id = p.id 
               WHERE a.doctor_id = ? 
-              ORDER BY a.appointment_date ASC`, 
-        [req.session.user.id], 
+              ORDER BY a.appointment_date ASC`,
+        [req.user.id],
         (err, results) => {
             if (err) return res.status(500).send(err);
             res.send(results);
@@ -777,28 +852,28 @@ app.get('/appointments/doctor-schedule', (req, res) => {
 
 // Update appointment status (Doctor)
 app.put('/appointments/:id/status', (req, res) => {
-    if (!req.session.user || req.session.user.role !== 'doctor') {
+    if (!req.user || req.user.role !== 'doctor') {
         return res.status(403).send('Forbidden');
     }
-    
+
     const { status } = req.body; // 'scheduled', 'completed', 'cancelled'
     const appointmentId = req.params.id;
-    
+
     if (!status || !['scheduled', 'completed', 'cancelled'].includes(status)) {
         return res.status(400).send('Invalid status');
     }
-    
+
     db.query('UPDATE appointments SET status = ? WHERE id = ?', [status, appointmentId], (err) => {
         if (err) return res.status(500).send(err);
-        
+
         // Notify patient about status change
         db.query('SELECT patient_id FROM appointments WHERE id = ?', [appointmentId], (err, result) => {
             if (err || result.length === 0) return;
-            
+
             const patientId = result[0].patient_id;
             db.query('SELECT name FROM patients WHERE id = ?', [patientId], (err, patientResult) => {
                 if (err || patientResult.length === 0) return;
-                
+
                 const patientName = patientResult[0].name;
                 db.query('INSERT INTO notifications (user_id, title, message, type) VALUES (?, ?, ?, ?)', [
                     patientId,
@@ -808,19 +883,19 @@ app.put('/appointments/:id/status', (req, res) => {
                 ]);
             });
         });
-        
+
         res.send({ success: true });
     });
 });
 
 // Cancel appointment (Patient)
 app.delete('/appointments/:id/cancel', (req, res) => {
-    if (!req.session.user || req.session.user.role !== 'patient') {
+    if (!req.user || req.user.role !== 'patient') {
         return res.status(403).send('Forbidden');
     }
-    
+
     const appointmentId = req.params.id;
-    
+
     db.query('DELETE FROM appointments WHERE id = ?', [appointmentId], (err) => {
         if (err) return res.status(500).send(err);
         res.send({ success: true });
@@ -829,10 +904,10 @@ app.delete('/appointments/:id/cancel', (req, res) => {
 
 // Get available doctors for appointment
 app.get('/appointments/available-doctors', (req, res) => {
-    if (!req.session.user) {
+    if (!req.user) {
         return res.status(401).send('Not authenticated');
     }
-    
+
     db.query('SELECT id, username FROM users WHERE role = ?', ['doctor'], (err, results) => {
         if (err) return res.status(500).send(err);
         res.send(results);
@@ -843,26 +918,26 @@ app.get('/appointments/available-doctors', (req, res) => {
 
 // Approve appointment (Doctor)
 app.put('/appointments/:id/approve', (req, res) => {
-    if (!req.session.user || req.session.user.role !== 'doctor') {
+    if (!req.user || req.user.role !== 'doctor') {
         return res.status(403).send('Forbidden: Only doctors can approve appointments');
     }
-    
+
     const appointmentId = req.params.id;
     const { notes } = req.body; // Optional doctor notes
-    
-    db.query('UPDATE appointments SET approval_status = ?, approved_at = NOW(), notes = ? WHERE id = ?', 
-        ['approved', notes || '', appointmentId], 
+
+    db.query('UPDATE appointments SET approval_status = ?, approved_at = NOW(), notes = ? WHERE id = ?',
+        ['approved', notes || '', appointmentId],
         (err) => {
             if (err) return res.status(500).send(err);
-            
+
             // Notify patient about approval
             db.query('SELECT patient_id FROM appointments WHERE id = ?', [appointmentId], (err, result) => {
                 if (err || result.length === 0) return;
-                
+
                 const patientId = result[0].patient_id;
                 db.query('SELECT name FROM patients WHERE id = ?', [patientId], (err, patientResult) => {
                     if (err || patientResult.length === 0) return;
-                    
+
                     const patientName = patientResult[0].name;
                     db.query('INSERT INTO notifications (user_id, title, message, type) VALUES (?, ?, ?, ?)', [
                         patientId,
@@ -872,7 +947,7 @@ app.put('/appointments/:id/approve', (req, res) => {
                     ]);
                 });
             });
-            
+
             res.send({ success: true, message: 'Appointment approved successfully' });
         }
     );
@@ -880,30 +955,30 @@ app.put('/appointments/:id/approve', (req, res) => {
 
 // Reject appointment (Doctor)
 app.put('/appointments/:id/reject', (req, res) => {
-    if (!req.session.user || req.session.user.role !== 'doctor') {
+    if (!req.user || req.user.role !== 'doctor') {
         return res.status(403).send('Forbidden: Only doctors can reject appointments');
     }
-    
+
     const appointmentId = req.params.id;
     const { reason } = req.body; // Reason for rejection
-    
+
     if (!reason) {
         return res.status(400).send('Rejection reason is required');
     }
-    
-    db.query('UPDATE appointments SET approval_status = ?, notes = ? WHERE id = ?', 
-        ['rejected', reason, appointmentId], 
+
+    db.query('UPDATE appointments SET approval_status = ?, notes = ? WHERE id = ?',
+        ['rejected', reason, appointmentId],
         (err) => {
             if (err) return res.status(500).send(err);
-            
+
             // Notify patient about rejection
             db.query('SELECT patient_id FROM appointments WHERE id = ?', [appointmentId], (err, result) => {
                 if (err || result.length === 0) return;
-                
+
                 const patientId = result[0].patient_id;
                 db.query('SELECT name FROM patients WHERE id = ?', [patientId], (err, patientResult) => {
                     if (err || patientResult.length === 0) return;
-                    
+
                     const patientName = patientResult[0].name;
                     db.query('INSERT INTO notifications (user_id, title, message, type) VALUES (?, ?, ?, ?)', [
                         patientId,
@@ -913,7 +988,7 @@ app.put('/appointments/:id/reject', (req, res) => {
                     ]);
                 });
             });
-            
+
             res.send({ success: true, message: 'Appointment rejected' });
         }
     );
@@ -921,16 +996,16 @@ app.put('/appointments/:id/reject', (req, res) => {
 
 // Get pending appointments for doctor (to approve/reject)
 app.get('/appointments/pending-approvals', (req, res) => {
-    if (!req.session.user || req.session.user.role !== 'doctor') {
+    if (!req.user || req.user.role !== 'doctor') {
         return res.status(403).send('Forbidden');
     }
-    
+
     db.query(`SELECT a.*, p.name as patient_name, p.age as patient_age
               FROM appointments a 
               JOIN patients p ON a.patient_id = p.id 
               WHERE a.doctor_id = ? AND a.approval_status = 'pending'
-              ORDER BY a.created_at ASC`, 
-        [req.session.user.id], 
+              ORDER BY a.created_at ASC`,
+        [req.user.id],
         (err, results) => {
             if (err) return res.status(500).send(err);
             res.send(results);
@@ -940,26 +1015,26 @@ app.get('/appointments/pending-approvals', (req, res) => {
 
 // Get all appointments with approval status for doctor
 app.get('/appointments/doctor-all', (req, res) => {
-    if (!req.session.user || req.session.user.role !== 'doctor') {
+    if (!req.user || req.user.role !== 'doctor') {
         return res.status(403).send('Forbidden');
     }
-    
+
     const { filter } = req.query; // 'all', 'pending', 'approved', 'rejected'
-    
+
     let query = `SELECT a.*, p.name as patient_name, p.age as patient_age 
                  FROM appointments a 
                  JOIN patients p ON a.patient_id = p.id 
                  WHERE a.doctor_id = ?`;
-    
+
     if (filter && filter !== 'all') {
         query += ` AND a.approval_status = ?`;
-        db.query(query, [req.session.user.id, filter], (err, results) => {
+        db.query(query, [req.user.id, filter], (err, results) => {
             if (err) return res.status(500).send(err);
             res.send(results);
         });
     } else {
-        db.query(query + ' ORDER BY a.approval_status DESC, a.appointment_date ASC', 
-            [req.session.user.id], 
+        db.query(query + ' ORDER BY a.approval_status DESC, a.appointment_date ASC',
+            [req.user.id],
             (err, results) => {
                 if (err) return res.status(500).send(err);
                 res.send(results);
@@ -970,26 +1045,26 @@ app.get('/appointments/doctor-all', (req, res) => {
 
 // Reschedule appointment (Patient - after rejection)
 app.put('/appointments/:id/reschedule', (req, res) => {
-    if (!req.session.user || req.session.user.role !== 'patient') {
+    if (!req.user || req.user.role !== 'patient') {
         return res.status(403).send('Forbidden');
     }
-    
+
     const { appointment_date, reason } = req.body;
     const appointmentId = req.params.id;
-    
+
     if (!appointment_date) {
         return res.status(400).send('New date/time is required');
     }
-    
-    db.query('UPDATE appointments SET appointment_date = ?, approval_status = ?, reason = ? WHERE id = ?', 
-        [appointment_date, 'pending', reason || 'Rescheduling requested', appointmentId], 
+
+    db.query('UPDATE appointments SET appointment_date = ?, approval_status = ?, reason = ? WHERE id = ?',
+        [appointment_date, 'pending', reason || 'Rescheduling requested', appointmentId],
         (err) => {
             if (err) return res.status(500).send(err);
-            
+
             // Notify doctor about reschedule request
             db.query('SELECT doctor_id FROM appointments WHERE id = ?', [appointmentId], (err, result) => {
                 if (err || result.length === 0) return;
-                
+
                 const doctorId = result[0].doctor_id;
                 db.query('INSERT INTO notifications (user_id, title, message, type) VALUES (?, ?, ?, ?)', [
                     doctorId,
@@ -998,7 +1073,7 @@ app.put('/appointments/:id/reschedule', (req, res) => {
                     'appointment'
                 ]);
             });
-            
+
             res.send({ success: true, message: 'Reschedule request sent' });
         }
     );
@@ -1008,12 +1083,12 @@ app.put('/appointments/:id/reschedule', (req, res) => {
 
 // Get user notifications
 app.get('/notifications', (req, res) => {
-    if (!req.session.user) {
+    if (!req.user) {
         return res.status(401).send('Not authenticated');
     }
-    
-    db.query('SELECT * FROM notifications WHERE user_id = ? ORDER BY created_at DESC LIMIT 50', 
-        [req.session.user.id], 
+
+    db.query('SELECT * FROM notifications WHERE user_id = ? ORDER BY created_at DESC LIMIT 50',
+        [req.user.id],
         (err, results) => {
             if (err) return res.status(500).send(err);
             res.send(results);
@@ -1023,14 +1098,14 @@ app.get('/notifications', (req, res) => {
 
 // Mark notification as read
 app.put('/notifications/:id/read', (req, res) => {
-    if (!req.session.user) {
+    if (!req.user) {
         return res.status(401).send('Not authenticated');
     }
-    
+
     const notificationId = req.params.id;
-    
-    db.query('UPDATE notifications SET is_read = TRUE WHERE id = ? AND user_id = ?', 
-        [notificationId, req.session.user.id], 
+
+    db.query('UPDATE notifications SET is_read = TRUE WHERE id = ? AND user_id = ?',
+        [notificationId, req.user.id],
         (err) => {
             if (err) return res.status(500).send(err);
             res.send({ success: true });
@@ -1040,12 +1115,12 @@ app.put('/notifications/:id/read', (req, res) => {
 
 // Mark all notifications as read
 app.put('/notifications/read-all', (req, res) => {
-    if (!req.session.user) {
+    if (!req.user) {
         return res.status(401).send('Not authenticated');
     }
-    
-    db.query('UPDATE notifications SET is_read = TRUE WHERE user_id = ?', 
-        [req.session.user.id], 
+
+    db.query('UPDATE notifications SET is_read = TRUE WHERE user_id = ?',
+        [req.user.id],
         (err) => {
             if (err) return res.status(500).send(err);
             res.send({ success: true });
@@ -1055,12 +1130,12 @@ app.put('/notifications/read-all', (req, res) => {
 
 // Get unread notification count
 app.get('/notifications/unread-count', (req, res) => {
-    if (!req.session.user) {
+    if (!req.user) {
         return res.status(401).send('Not authenticated');
     }
-    
-    db.query('SELECT COUNT(*) as count FROM notifications WHERE user_id = ? AND is_read = FALSE', 
-        [req.session.user.id], 
+
+    db.query('SELECT COUNT(*) as count FROM notifications WHERE user_id = ? AND is_read = FALSE',
+        [req.user.id],
         (err, results) => {
             if (err) return res.status(500).send(err);
             res.send(results[0]);
@@ -1070,14 +1145,14 @@ app.get('/notifications/unread-count', (req, res) => {
 
 // Delete notification
 app.delete('/notifications/:id', (req, res) => {
-    if (!req.session.user) {
+    if (!req.user) {
         return res.status(401).send('Not authenticated');
     }
-    
+
     const notificationId = req.params.id;
-    
-    db.query('DELETE FROM notifications WHERE id = ? AND user_id = ?', 
-        [notificationId, req.session.user.id], 
+
+    db.query('DELETE FROM notifications WHERE id = ? AND user_id = ?',
+        [notificationId, req.user.id],
         (err) => {
             if (err) return res.status(500).send(err);
             res.send({ success: true });
@@ -1087,7 +1162,23 @@ app.delete('/notifications/:id', (req, res) => {
 
 // ==================== ADMIN ENDPOINTS ====================
 
+const https = require('https');
+const fs = require('fs');
+const path = require('path');
+
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-    console.log(`Server running on port ${PORT}`);
-});
+
+try {
+    const options = {
+        key: fs.readFileSync(path.join(__dirname, 'server.key')),
+        cert: fs.readFileSync(path.join(__dirname, 'server.cert'))
+    };
+    https.createServer(options, app).listen(PORT, () => {
+        console.log(`🔒 HTTPS Server securely running on port ${PORT}`);
+    });
+} catch (e) {
+    console.log("TLS Certs not found, fallback to HTTP");
+    app.listen(PORT, () => {
+        console.log(`Server running on port ${PORT}`);
+    });
+}
